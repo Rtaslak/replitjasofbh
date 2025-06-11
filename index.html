@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <base href="/" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jason of Beverly Hills</title>
+    <meta name="description" content="Jason of Beverly Hills" />
+    <meta name="author" content="Lovable" />
+
+    <meta property="og:title" content="Jason Of Beverly Hills" />
+    <meta property="og:description" content="Track your Orders" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://app.jasonofbh.net/lovable-uploads/JBH-Wallpaper1.jpg" />
+
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@lovable_dev" />
+    <meta property="og:image" content="https://app.jasonofbh.net/lovable-uploads/JBH-Wallpaper1.jpg" />
+
+    
+    <!-- Emergency fix for auth loops -->
+    <script>
+      // This is a safety measure to prevent infinite loops
+      (function() {
+        // Only run this on the auth page
+        if (window.location.pathname.includes('/auth')) {
+          // Check if we have auth tokens
+          const hasToken = 
+            (window.sessionStorage && window.sessionStorage.getItem('accessToken')) || 
+            (window.localStorage && window.localStorage.getItem('accessToken'));
+          
+          if (hasToken) {
+            console.log("💥 LOOP BREAKER: Detected auth tokens on auth page. Forcing redirect to dashboard.");
+            window.location.href = '/dashboard';
+          }
+        }
+      })();
+    </script>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <!-- IMPORTANT: DO NOT REMOVE THIS SCRIPT TAG OR THIS VERY COMMENT! -->
+    <script src="https://cdn.gpteng.co/gptengineer.js" type="module"></script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

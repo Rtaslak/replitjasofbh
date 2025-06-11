@@ -1,0 +1,2339 @@
+# JasonOfBH Backend Code
+Generated on Fri Jun  6 23:12:47 UTC 2025
+=======================================
+
+
+## File: ./server/src/cognito-auth.js
+```javascript
+const { 
+  CognitoIdentityProviderClient, 
+  InitiateAuthCommand,
+  AdminCreateUserCommand,
+  AdminSetUserPasswordCommand
+} = require('@aws-sdk/client-cognito-identity-provider');
+const crypto = require('crypto');
+
+// Create a Cognito client with better error handling
+const createCognitoClient = () => {
+  try {
+    return new CognitoIdentityProviderClient({ 
+      region: process.env.COGNITO_REGION,
+      credentials: process.env.AWS_ACCESS_KEY_ID ? {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+      } : undefined
+    });
+  } catch (error) {
+    console.error('Failed to create Cognito client:', error);
+    throw new Error('Authentication service unavailable');
+  }
+};
+
+// Helper function to create the secret hash - FIXED VERSION
+const createSecretHash = (username, clientId, clientSecret) => {
+  if (!clientSecret) {
+    console.log('🔍 No client secret provided, skipping SECRET_HASH');
+    return null;
+  }
+  
+  console.log('🔐 Creating SECRET_HASH for user:', username);
+  const message = username + clientId;
+  const hmac = crypto.createHmac('sha256', clientSecret);
+  hmac.update(message);
+  const hash = hmac.digest('base64');
+  console.log('✅ SECRET_HASH created successfully');
+  return hash;
+};
+
+// Authenticate user with Cognito
+const authenticateUser = async (username, password) => {
+  try {
+    console.log('🔐 Authenticating user with Cognito:', username);
+    const client = createCognitoClient();
+    
+    // Prepare the auth parameters
+    const authParams = {
+      USERNAME: username,
+      PASSWORD: password
+    };
+    
+    // Add the SECRET_HASH if client secret is configured
+    if (process.env.COGNITO_CLIENT_SECRET) {
+      const secretHash = createSecretHash(
+        username,
+        process.env.COGNITO_CLIENT_ID,
+        process.env.COGNITO_CLIENT_SECRET
+      );
+      if (secretHash) {
+        authParams.SECRET_HASH = secretHash;
+        console.log('🔐 Added SECRET_HASH to auth request');
+      }
+    } else {
+      console.log('⚠️ No COGNITO_CLIENT_SECRET found in environment');
+    }
+    
+    const command = new InitiateAuthCommand({
+      AuthFlow: 'USER_PASSWORD_AUTH',
+      ClientId: process.env.COGNITO_CLIENT_ID,
+      AuthParameters: authParams
+    });
+    
+    console.log('📤 Sending auth request to Cognito...');
+    const response = await client.send(command);
+    console.log('✅ Cognito authentication successful');
+    
+    // Log token info for debugging
+    console.log('🎫 Token info:', {
+      accessTokenLength: response.AuthenticationResult.AccessToken?.length,
+      idTokenLength: response.AuthenticationResult.IdToken?.length,
+      refreshTokenLength: response.AuthenticationResult.RefreshToken?.length,
+      expiresIn: response.AuthenticationResult.ExpiresIn
+    });
+    
+    return {
+      success: true,
+      tokens: {
+        accessToken: response.AuthenticationResult.AccessToken,
+        idToken: response.AuthenticationResult.IdToken,
+        refreshToken: response.AuthenticationResult.RefreshToken,
+        expiresIn: response.AuthenticationResult.ExpiresIn
+      }
+    };
+  } catch (error) {
+    console.error('❌ Cognito authentication failed:', error.name, error.message);
+    
+    // Format user-friendly error messages
+    let errorMessage = 'Authentication failed';
+    
+    if (error.name === 'NotAuthorizedException') {
+      errorMessage = 'Incorrect username or password';
+    } else if (error.name === 'UserNotFoundException') {
+      errorMessage = 'User not found';
+    } else if (error.name === 'UserNotConfirmedException') {
+      errorMessage = 'User is not confirmed';
+    } else if (error.name === 'PasswordResetRequiredException') {
+      errorMessage = 'Password reset required';
+    }
+    
+    return { success: false, error: errorMessage };
+  }
+};
+
+// Refresh tokens using refresh token - FIXED VERSION
+const refreshTokens = async (refreshToken) => {
+  try {
+    console.log('🔄 Refreshing tokens with Cognito...');
+    const client = createCognitoClient();
+    
+    const authParams = {
+      REFRESH_TOKEN: refreshToken
+    };
+    
+    // For refresh token, we need to get the username from the refresh token
+    // or handle the SECRET_HASH differently
+    if (process.env.COGNITO_CLIENT_SECRET) {
+      console.log('⚠️ Client secret configured but refresh tokens typically don\'t need SECRET_HASH');
+      // For refresh tokens, Cognito usually doesn't require SECRET_HASH
+      // If it does, we'd need to decode the refresh token to get the username
+    }
+    
+    const command = new InitiateAuthCommand({
+      AuthFlow: 'REFRESH_TOKEN_AUTH',
+      ClientId: process.env.COGNITO_CLIENT_ID,
+      AuthParameters: authParams
+    });
+    
+    console.log('📤 Sending refresh request to Cognito...');
+    const response = await client.send(command);
+    console.log('✅ Token refresh successful');
+    
+    return {
+      success: true,
+      tokens: {
+        accessToken: response.AuthenticationResult.AccessToken,
+        idToken: response.AuthenticationResult.IdToken,
+        // Note: Refresh tokens don't typically change on refresh
+        expiresIn: response.AuthenticationResult.ExpiresIn
+      }
+    };
+  } catch (error) {
+    console.error('❌ Token refresh failed:', error.name, error.message);
+    
+    // Format user-friendly error messages
+    let errorMessage = 'Token refresh failed';
+    
+    if (error.name === 'NotAuthorizedException') {
+      errorMessage = 'Invalid refresh token';
+    }
+    
+    return { success: false, error: errorMessage };
+  }
+};
+
+// Add this function to your cognito-auth.js file
+const signupUser = async (email, password, name, role) => {
+  try {
+    console.log('⭐ Creating new user in Cognito:', email);
+    
+    const client = createCognitoClient();
+    
+    // Prepare user attributes
+    const userAttributes = [
+      { Name: 'email', Value: email },
+      { Name: 'email_verified', Value: 'true' },
+      { Name: 'name', Value: name }
+    ];
+    
+    // Add role if specified
+    if (role) {
+      userAttributes.push({ Name: 'custom:role', Value: role });
+    }
+    
+    // Create the user
+    const command = new AdminCreateUserCommand({
+      UserPoolId: process.env.COGNITO_USER_POOL_ID,
+      Username: email,
+      TemporaryPassword: password,
+      UserAttributes: userAttributes,
+      MessageAction: 'SUPPRESS' // Don't send a welcome email
+    });
+    
+    const result = await client.send(command);
+    
+    // Set the password to a permanent one
+    if (result.User) {
+      try {
+        const setPwdCommand = new AdminSetUserPasswordCommand({
+          UserPoolId: process.env.COGNITO_USER_POOL_ID,
+          Username: email,
+          Password: password,
+          Permanent: true
+        });
+        
+        await client.send(setPwdCommand);
+        console.log('✅ Password set as permanent');
+      } catch (pwdError) {
+        console.error('❌ Error setting permanent password:', pwdError);
+        // Don't fail the whole request if this step fails
+      }
+    }
+    
+    console.log('✅ User created successfully in Cognito');
+    return {
+      success: true,
+      user: {
+        id: result.User.Username,
+        email,
+        name,
+        role: role || 'Operator'
+      }
+    };
+  } catch (error) {
+    console.error('❌ Signup failed:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+module.exports = {
+  authenticateUser,
+  refreshTokens,
+  signupUser
+};```
+
+## File: ./server/src/index.js
+```javascript
+const express = require('express');
+const http = require('http');
+const cors = require('cors');
+const cookieParser = require('cookie-parser');
+const { Server } = require('socket.io');
+const { connectToMqtt, ensureMqttConnected } = require('./mqtt/connection');
+const { logger } = require('./utils/logger');
+const dotenv = require('dotenv');
+const path = require('path');
+const { authenticateToken } = require('./middleware/auth');
+const orderService = require('./services/orderService');
+// ✅ Import socket setup function
+const { setupSocketHandlers } = require('./socket');
+
+// Load environment variables with explicit path
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+// Log key environment variables (without sensitive data) - using new logger
+logger.info('🚀 Starting Jason of Beverly Hills Server...');
+logger.info('Environment Configuration:', {
+  NODE_ENV: process.env.NODE_ENV,
+  PORT: process.env.PORT,
+  LOG_LEVEL: process.env.LOG_LEVEL,
+  COGNITO_CONFIGURED: !!(process.env.COGNITO_CLIENT_ID && process.env.COGNITO_CLIENT_SECRET),
+  AWS_CONFIGURED: !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY),
+  AWS_REGION: process.env.AWS_REGION
+});
+
+const PORT = process.env.PORT || 8000;
+const HOST = process.env.HOST || '0.0.0.0';
+
+const app = express();
+
+// Increase payload limits for image uploads
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(cookieParser());
+
+// Unified allowed origins for both Express and Socket.IO
+const allowedOrigins = process.env.NODE_ENV === 'production' 
+ ? ['https://app.jasonofbh.net'] 
+ : ['https://app.jasonofbh.net', 'http://app.jasonofbh.net', 'http://localhost:3000'];
+
+const corsOptions = {
+ origin: function (origin, callback) {
+   if (!origin || allowedOrigins.includes(origin)) {
+     callback(null, true);
+   } else {
+     logger.warn('CORS request blocked', { origin, allowedOrigins });
+     callback(new Error('Not allowed by CORS'));
+   }
+ },
+ credentials: true,
+ methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+ allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Cache-Control', 'Accept']
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
+// Add explicit headers for common CORS issues
+app.use((req, res, next) => {
+ res.header('Access-Control-Allow-Origin', req.headers.origin || 'https://app.jasonofbh.net');
+ res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+ res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Cache-Control, Accept');
+ res.header('Access-Control-Allow-Credentials', 'true');
+ 
+ if (req.method === 'OPTIONS') {
+   return res.sendStatus(200);
+ }
+ 
+ next();
+});
+
+// Minimal request logging - only errors and important events
+// (Removed noisy API request logging)
+
+// Health check route
+app.get('/api/health', (req, res) => {
+ res.status(200).send('OK');
+});
+
+// Test route to verify API connectivity
+app.get('/api/test', (req, res) => {
+ logger.api.debug('Test endpoint accessed');
+ res.json({ 
+   message: 'API is working',
+   timestamp: new Date().toISOString(),
+   environment: process.env.NODE_ENV,
+   logLevel: process.env.LOG_LEVEL,
+   s3_configured: !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)
+ });
+});
+
+// Add upload routes for image handling
+logger.info('Registering upload routes...');
+try {
+  const uploadRoutes = require('./routes/upload');
+  app.use('/api', uploadRoutes);
+  logger.info('Upload routes registered successfully');
+} catch (error) {
+  logger.error('Failed to register upload routes', { error: error.message });
+}
+
+// Register other routes
+const routes = [
+  { path: '/api/auth', module: './routes/auth', name: 'auth' },
+  { path: '/api/departments', module: './routes/departments', name: 'departments' },
+  { path: '/api/stations', module: './routes/stations', name: 'stations' },
+  { path: '/api/orders', module: './routes/orders', name: 'orders' },
+  { path: '/api/users', module: './routes/users', name: 'users' }
+];
+
+routes.forEach(route => {
+  try {
+    app.use(route.path, require(route.module));
+    logger.debug(`${route.name} routes registered`);
+  } catch (error) {
+    logger.error(`Failed to register ${route.name} routes`, { error: error.message });
+  }
+});
+
+// Optional routes
+const optionalRoutes = [
+  { path: '/api/config', module: './routes/config', name: 'config' },
+  { path: '/api/mappings', module: './routes/mappings', name: 'mappings' },
+  { path: '/api/readers', module: './routes/readers', name: 'readers' }
+];
+
+optionalRoutes.forEach(route => {
+  try {
+    app.use(route.path, require(route.module));
+    logger.debug(`${route.name} routes registered`);
+  } catch (error) {
+    logger.debug(`${route.name} routes not found (optional)`);
+  }
+});
+
+// User Profile Endpoint
+app.get('/api/user-profile', authenticateToken, async (req, res) => {
+ try {
+   if (!req.user) {
+     return res.status(401).json({ error: 'Not authenticated' });
+   }
+   
+   const userId = req.user.sub || req.user.username;
+   const email = req.user.email || '';
+   const name = req.user.name || req.user.given_name || req.user.username || '';
+   const role = req.user['custom:role'] || req.user.customrole || 'User';
+   
+   logger.api.debug('User profile accessed', { userId, email, role });
+   
+   res.json({ 
+     id: userId,
+     email: email,
+     name: name,
+     role: role
+   });
+ } catch (error) {
+   logger.api.error('User profile error', { error: error.message });
+   res.status(500).json({ error: 'Failed to retrieve user profile' });
+ }
+});
+
+// S3 test endpoint
+app.get('/api/test-s3', authenticateToken, (req, res) => {
+  const s3Config = {
+    hasAccessKey: !!process.env.AWS_ACCESS_KEY_ID,
+    hasSecretKey: !!process.env.AWS_SECRET_ACCESS_KEY,
+    region: process.env.AWS_REGION,
+    bucketName: 'jasonofbeaverlyhills1'
+  };
+  
+  logger.api.debug('S3 configuration check', s3Config);
+  
+  res.json({
+    message: 'S3 Configuration Check',
+    config: s3Config,
+    ready: s3Config.hasAccessKey && s3Config.hasSecretKey && s3Config.region
+  });
+});
+
+// Global error handler
+app.use((error, req, res, next) => {
+  logger.error('Global error handler', { 
+    error: error.message, 
+    stack: error.stack,
+    url: req.url,
+    method: req.method
+  });
+  
+  if (error instanceof Error) {
+    // Handle specific multer errors
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        error: 'File too large',
+        details: 'Maximum file size is 10MB'
+      });
+    }
+    
+    if (error.code === 'LIMIT_FILE_COUNT') {
+      return res.status(413).json({
+        error: 'Too many files',
+        details: 'Maximum 10 files allowed'
+      });
+    }
+    
+    if (error.message === 'Only image files are allowed') {
+      return res.status(400).json({
+        error: 'Invalid file type',
+        details: 'Only image files are allowed'
+      });
+    }
+    
+    return res.status(500).json({
+      error: 'Server error',
+      details: error.message
+    });
+  }
+  
+  next(error);
+});
+
+// Create HTTP server
+const server = http.createServer(app);
+
+// Apply CORS to Socket.IO using the same configuration
+const io = new Server(server, {
+ cors: corsOptions,
+ transports: ['websocket', 'polling'],
+ allowUpgrades: true,
+ pingTimeout: 60000,
+ pingInterval: 25000
+});
+
+// ✅ Setup Socket.io handlers - THIS WAS MISSING!
+setupSocketHandlers(io);
+logger.info('✅ Socket.io handlers initialized');
+
+// Connect to MQTT with proper logging
+logger.info('Initializing MQTT connection...');
+const mqttClient = connectToMqtt(io);
+if (!mqttClient) {
+ logger.error('Initial MQTT client connection failed, will retry automatically');
+} else {
+ logger.info('MQTT client initialized successfully');
+}
+
+// Off-Site Detection Background Service
+let detectionInterval;
+
+function startOffSiteDetection() {
+  if (detectionInterval) return; // Already running
+  
+  logger.warn('🔍 Starting off-site detection service...');
+  
+  // Check immediately once on startup
+  setTimeout(async () => {
+    try {
+      const initialCheck = await orderService.checkForMissingOrders(30, io);
+      if (initialCheck > 0) {
+        logger.info(`📍 Initial check: Found ${initialCheck} orders that went off-site`);
+        io.emit('orders_moved_offsite', { count: initialCheck });
+      }
+    } catch (error) {
+      logger.error('❌ Error in initial off-site detection:', { error: error.message });
+    }
+  }, 5000); // Wait 5 seconds for everything to initialize
+  
+  // Then start the regular interval
+  detectionInterval = setInterval(async () => {
+    try {
+      const missingCount = await orderService.checkForMissingOrders(300, io); // 5 minutes instead of 30 seconds
+      if (missingCount > 0) {
+        logger.info(`📍 Found ${missingCount} orders that went off-site`);
+        
+        // Emit to all connected clients that orders moved off-site
+        io.emit('orders_moved_offsite', { count: missingCount });
+      }
+    } catch (error) {
+      logger.error('❌ Error in off-site detection:', { error: error.message });
+    }
+  }, 60000); // Check every 15 seconds
+}
+
+// Stop Off-Site Detection Service
+function stopOffSiteDetection() {
+  if (detectionInterval) {
+    clearInterval(detectionInterval);
+    detectionInterval = null;
+    logger.info('🛑 Off-site detection service stopped');
+  }
+}
+
+// Handle graceful shutdown
+const gracefulShutdown = () => {
+ logger.info('Shutting down server...');
+ 
+ // Stop off-site detection
+ stopOffSiteDetection();
+ 
+ // Close MQTT connection if it exists
+ if (typeof closeMqttConnection === 'function') {
+   try {
+     closeMqttConnection();
+     logger.info('MQTT connection closed');
+   } catch (error) {
+     logger.error('Error closing MQTT connection', { error: error.message });
+   }
+ }
+ 
+ // Close server
+ server.close(() => {
+   logger.info('HTTP server closed');
+   process.exit(0);
+ });
+ 
+ // Force exit after 5 seconds if shutdown hangs
+ setTimeout(() => {
+   logger.error('Forced shutdown after timeout');
+   process.exit(1);
+ }, 5000);
+};
+
+// Register shutdown handlers
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
+
+// ✅ Remove the duplicate socket connection handler since it's now in setupSocketHandlers
+// WebSocket Connection - REMOVED (handled by setupSocketHandlers now)
+
+// Start the server
+server.listen(PORT, HOST, () => {
+  logger.warn(`✅ Server running at http://${HOST}:${PORT}`);
+  logger.warn(`🖼️ Image upload endpoint: http://${HOST}:${PORT}/api/upload`);
+  logger.warn(`🔧 S3 test endpoint: http://${HOST}:${PORT}/api/test-s3`);
+ 
+ // Start off-site detection after server is running
+ setTimeout(() => {
+   startOffSiteDetection();
+ }, 5000); // Wait 5 seconds for everything to initialize
+});
+
+// Handle unexpected errors
+process.on('uncaughtException', (error) => {
+ logger.error('Uncaught Exception', { error: error.message, stack: error.stack });
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+ logger.error('Unhandled Rejection', { reason, promise: promise.toString() });
+});```
+
+## File: ./server/src/routes/auth.js
+```javascript
+const express = require('express');
+const router = express.Router();
+const { authenticateUser, refreshTokens } = require('../cognito-auth');
+const { authenticateToken } = require('../middleware/auth');
+const { logError, logInfo } = require('../utils/logger');
+const { signupUser } = require('../cognito-auth');
+
+// Login endpoint with enhanced session management
+router.post('/', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    
+    if (!username || !password) {
+      return res.status(400).json({ 
+        error: 'Username and password required',
+        code: 'MISSING_CREDENTIALS'
+      });
+    }
+    
+    logInfo(`Login attempt for user: ${username}`);
+    const authResult = await authenticateUser(username, password);
+    
+    if (!authResult.success) {
+      logInfo(`Login failed for user: ${username} - ${authResult.error}`);
+      return res.status(401).json({ 
+        error: authResult.error || 'Authentication failed',
+        code: 'AUTH_FAILED' 
+      });
+    }
+    
+    // Set refresh token in an HTTP-only cookie for security
+    res.cookie('refreshToken', authResult.tokens.refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+      sameSite: 'strict'
+    });
+    
+    logInfo(`Login successful for user: ${username}`);
+    
+    // Return access and ID tokens to the client
+    res.json({
+      success: true,
+      accessToken: authResult.tokens.accessToken,
+      idToken: authResult.tokens.idToken,
+      refreshToken: authResult.tokens.refreshToken, // Include for clients without cookie support
+      expiresIn: authResult.tokens.expiresIn,
+      message: 'Login successful'
+    });
+  } catch (error) {
+    logError(`Login error: ${error.message}`);
+    res.status(500).json({ 
+      error: 'Login failed: ' + (error.message || 'Unknown error'),
+      code: 'LOGIN_ERROR'
+    });
+  }
+});
+
+// Enhanced token refresh route with better error handling
+router.post('/refresh-token', async (req, res) => {
+  try {
+    // Try to get refresh token from cookie first, then from request body
+    const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
+    
+    if (!refreshToken) {
+      logInfo('Refresh token request without token');
+      return res.status(401).json({ 
+        error: 'Refresh token required',
+        code: 'MISSING_REFRESH_TOKEN'
+      });
+    }
+    
+    logInfo('Attempting token refresh');
+    const refreshResult = await refreshTokens(refreshToken);
+    
+    if (!refreshResult.success) {
+      logError(`Token refresh failed: ${refreshResult.error}`);
+      
+      // Clear the refresh token cookie if it's invalid
+      res.clearCookie('refreshToken');
+      
+      return res.status(401).json({ 
+        error: refreshResult.error || 'Token refresh failed',
+        code: 'REFRESH_FAILED'
+      });
+    }
+    
+    logInfo('Token refreshed successfully');
+    
+    // Return new tokens
+    res.json({
+      success: true,
+      accessToken: refreshResult.tokens.accessToken,
+      idToken: refreshResult.tokens.idToken,
+      expiresIn: refreshResult.tokens.expiresIn,
+      message: 'Tokens refreshed successfully'
+    });
+  } catch (error) {
+    logError(`Token refresh error: ${error.message}`);
+    
+    // Clear potentially corrupted refresh token
+    res.clearCookie('refreshToken');
+    
+    res.status(500).json({ 
+      error: 'Token refresh failed: ' + (error.message || 'Unknown error'),
+      code: 'REFRESH_ERROR'
+    });
+  }
+});
+
+// Signup endpoint
+router.post('/signup', async (req, res) => {
+  try {
+    const { email, password, name, role } = req.body;
+    
+    if (!email || !password || !name) {
+      return res.status(400).json({ 
+        error: 'Email, password, and name are required',
+        code: 'MISSING_FIELDS'
+      });
+    }
+    
+    // Ensure email is from jasonofbh.com domain
+    if (!email.endsWith('@jasonofbh.com')) {
+      return res.status(400).json({
+        error: 'Email must be a jasonofbh.com address',
+        code: 'INVALID_EMAIL_DOMAIN'
+      });
+    }
+    
+    // Use a valid role or default to Operator
+    const validRole = ['Administrator', 'Salesperson', 'Operator'].includes(role) ? role : 'Operator';
+    
+    logInfo(`Signup attempt for: ${email} with role: ${validRole}`);
+    const result = await signupUser(email, password, name, validRole);
+    
+    if (!result.success) {
+      logError(`Signup failed for ${email}: ${result.error}`);
+      return res.status(400).json({ 
+        error: result.error || 'Failed to create user',
+        code: 'SIGNUP_FAILED'
+      });
+    }
+    
+    logInfo(`User created successfully: ${email}`);
+    
+    // Return success response
+    res.status(201).json({
+      success: true,
+      message: 'User created successfully',
+      user: result.user
+    });
+  } catch (error) {
+    logError(`Signup error: ${error.message}`);
+    res.status(500).json({ 
+      error: 'Signup failed: ' + (error.message || 'Unknown error'),
+      code: 'SIGNUP_ERROR'
+    });
+  }
+});
+
+// Enhanced logout route
+router.post('/logout', (req, res) => {
+  try {
+    // Get user info from request if available
+    const userId = req.user?.sub || 'unknown';
+    
+    // Clear the refresh token cookie
+    res.clearCookie('refreshToken');
+    
+    logInfo(`User logged out: ${userId}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Logged out successfully',
+      code: 'LOGOUT_SUCCESS'
+    });
+  } catch (error) {
+    logError(`Logout error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: 'Logout failed',
+      code: 'LOGOUT_ERROR'
+    });
+  }
+});
+
+// Get current user profile with enhanced error handling
+router.get('/user-profile', authenticateToken, async (req, res) => {
+  try {
+    // The user info is already attached to req by authenticateToken middleware
+    if (!req.user) {
+      return res.status(401).json({ 
+        error: 'Not authenticated',
+        code: 'NOT_AUTHENTICATED'
+      });
+    }
+    
+    // Extract user information from the decoded token
+    const userId = req.user.sub || req.user.username;
+    const email = req.user.email || '';
+    const name = req.user.name || req.user.given_name || req.user.username || '';
+    const role = req.user['custom:role'] || req.user.customrole || 'User';
+    
+    logInfo(`User profile fetched: ${userId}`);
+    
+    // Return user info
+    res.json({ 
+      success: true,
+      user: {
+        id: userId,
+        email: email,
+        name: name,
+        role: role
+      }
+    });
+  } catch (error) {
+    logError(`User profile error: ${error.message}`);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to retrieve user profile',
+      code: 'PROFILE_ERROR'
+    });
+  }
+});
+
+// Session validation endpoint
+router.get('/validate-session', authenticateToken, async (req, res) => {
+  try {
+    // If we reach here, the token is valid (thanks to authenticateToken middleware)
+    const userId = req.user.sub || req.user.username;
+    
+    res.json({
+      success: true,
+      valid: true,
+      user: {
+        id: userId,
+        email: req.user.email || '',
+        name: req.user.name || req.user.given_name || req.user.username || '',
+        role: req.user['custom:role'] || req.user.customrole || 'User'
+      },
+      message: 'Session is valid'
+    });
+  } catch (error) {
+    logError(`Session validation error: ${error.message}`);
+    res.status(401).json({
+      success: false,
+      valid: false,
+      error: 'Session validation failed',
+      code: 'SESSION_INVALID'
+    });
+  }
+});
+
+// Check if user email exists (for password reset flow)
+router.post('/check-email', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ 
+        error: 'Email is required',
+        code: 'MISSING_EMAIL'
+      });
+    }
+    
+    // For security reasons, we don't actually reveal if an email exists
+    // This prevents email enumeration attacks
+    res.json({ 
+      success: true,
+      message: 'If this email exists, you will receive reset instructions'
+    });
+  } catch (error) {
+    logError(`Email check error: ${error.message}`);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to process email check',
+      code: 'EMAIL_CHECK_ERROR'
+    });
+  }
+});
+
+module.exports = router;```
+
+## File: ./server/src/routes/orders.js
+```javascript
+const express = require('express');
+const router = express.Router();
+const { authenticateToken, requireRole } = require('../middleware/auth');
+const { handleApiError } = require('../utils/errorHandler');
+const { logInfo, logError } = require('../utils/logger');
+const { Order, Tageventhistory, Department } = require('../../models'); // Added Tageventhistory and Department
+const { v4: uuidv4 } = require('uuid');
+const { Op } = require('sequelize');
+const AWS = require('aws-sdk');
+const orderService = require('../services/orderService');
+
+// ✅ Import socket.io instance for real-time updates
+const { getIO } = require('../socket'); // Assuming you export getIO from socket/index.js
+
+// ✅ Configure AWS S3 for image deletion when orders are deleted
+const s3 = new AWS.S3({
+  region: process.env.AWS_REGION || "us-east-1",
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+});
+const bucketName = "jasonofbeaverlyhills1";
+
+// ✅ Helper function to emit WebSocket events
+const emitOrderEvent = (eventName, data) => {
+  try {
+    const io = getIO();
+    if (io) {
+      io.emit(eventName, data);
+      logInfo(`WebSocket event emitted: ${eventName} for order ${data.id || data.orderNumber}`);
+    }
+  } catch (error) {
+    logError(`Failed to emit WebSocket event ${eventName}: ${error.message}`);
+  }
+};
+
+// DEBUG endpoint - only for development
+router.get('/debug-token', authenticateToken, (req, res) => {
+  // Return user information from the token
+  const userInfo = {
+    sub: req.user.sub,
+    email: req.user.email,
+    // Include all properties that might contain role info
+    role: req.user.role,
+    customRole: req.user.customrole,
+    customColonRole: req.user['custom:role'],
+    // Send the full decoded token
+    fullToken: req.user
+  };
+  
+  res.json({
+    message: 'Debug information',
+    user: userInfo
+  });
+});
+
+// Get all orders - simplified version
+router.get('/', authenticateToken, async (req, res) => {
+  try {
+    // Get all orders without filters for now
+    const orders = await Order.findAll({
+      order: [['createdAt', 'DESC']]
+    });
+    
+    res.json(orders);
+  } catch (error) {
+    console.error('Error fetching orders:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch orders',
+      details: error.message
+    });
+  }
+});
+
+// 🆕 NEW: Get orders with tag history summary for Tag History page
+router.get('/tag-history', authenticateToken, async (req, res) => {
+  try {
+    console.log('🏷️ Fetching tag history from database...'); // Debug log
+    
+    // Get all orders that have tags
+    const ordersWithTags = await Order.findAll({
+      where: {
+        tagId: { 
+          [Op.not]: null,
+          [Op.ne]: ''
+        }
+      },
+      attributes: ['id', 'orderNumber', 'customer', 'tagId', 'status', 'currentDepartment', 'currentStation'],
+      order: [['orderNumber', 'DESC']]
+    });
+
+    console.log(`Found ${ordersWithTags.length} orders with tags`); // Debug log
+
+    // Get scan counts directly from Tageventhistory table
+    const ordersWithScanCount = await Promise.all(
+      ordersWithTags.map(async (order) => {
+        try {
+          // Count actual records in Tageventhistory table
+          const scanCount = await Tageventhistory.count({
+            where: { orderId: order.id }
+          });
+
+          console.log(`Order ${order.orderNumber} (${order.id}): ${scanCount} scans`); // Debug log
+
+          return {
+            id: order.id,
+            orderNumber: order.orderNumber,
+            customer: order.customer,
+            tagId: order.tagId,
+            status: order.status,
+            currentDepartment: order.currentDepartment,
+            currentStation: order.currentStation,
+            scanCount: scanCount || 0
+          };
+        } catch (countError) {
+          console.error(`Error counting scans for order ${order.orderNumber}:`, countError);
+          return {
+            id: order.id,
+            orderNumber: order.orderNumber,
+            customer: order.customer,
+            tagId: order.tagId,
+            status: order.status,
+            currentDepartment: order.currentDepartment,
+            currentStation: order.currentStation,
+            scanCount: 0
+          };
+        }
+      })
+    );
+
+    // Debug: Show total scans across all orders
+    const totalScans = ordersWithScanCount.reduce((sum, order) => sum + order.scanCount, 0);
+    console.log(`Total scans across all orders: ${totalScans}`); // Debug log
+
+    res.json(ordersWithScanCount);
+  } catch (error) {
+    console.error('❌ Error in tag-history endpoint:', error);
+    logError(`Failed to fetch tag history summary: ${error.message}`);
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to fetch tag history',
+      errorCode: 'TAG_HISTORY_FETCH_ERROR'
+    });
+  }
+});
+
+// 🆕 NEW: Get detailed scan history for a specific order
+router.get('/:id/tag-history', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    console.log(`Fetching order scan history for: ${id}`); // Debug log
+    
+    // Get the order
+    const order = await Order.findByPk(id, {
+      attributes: ['id', 'orderNumber', 'customer', 'tagId', 'status']
+    });
+
+    if (!order) {
+      console.log(`Order not found: ${id}`); // Debug log
+      return res.status(404).json({
+        error: 'Order not found',
+        code: 'ORDER_NOT_FOUND'
+      });
+    }
+
+    console.log(`Order found: ${order.orderNumber}, fetching scan history...`); // Debug log
+
+    // Get scan history with department info
+    const scanHistory = await Tageventhistory.findAll({
+      where: { orderId: id },
+      include: [{
+        model: Department,
+        as: 'department',
+        attributes: ['name', 'color'],
+        required: false // LEFT JOIN
+      }],
+      order: [['timestamp', 'ASC']] // Chronological order
+    });
+
+    console.log(`Found ${scanHistory.length} scan records`); // Debug log
+
+    res.json({
+      order: {
+        id: order.id,
+        orderNumber: order.orderNumber,
+        customer: order.customer,
+        tagId: order.tagId,
+        status: order.status
+      },
+      scanHistory: scanHistory.map(scan => ({
+        id: scan.id,
+        timestamp: scan.timestamp,
+        readerId: scan.readerId,
+        antenna: scan.antenna,
+        department: scan.department ? {
+          id: scan.departmentId,
+          name: scan.department.name,
+          color: scan.department.color
+        } : null,
+        stationName: scan.stationName
+      }))
+    });
+  } catch (error) {
+    console.error(`Error fetching order scan history:`, error); // Debug log
+    logError(`Failed to fetch order scan history: ${error.message}`);
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to fetch order scan history',
+      errorCode: 'ORDER_SCAN_HISTORY_ERROR'
+    });
+  }
+});
+
+// 🧪 TEMPORARY: Test endpoint to verify Tageventhistory model works
+router.get('/test-history', authenticateToken, async (req, res) => {
+  try {
+    console.log('Testing Tageventhistory model...');
+    
+    // Test creating a record
+    const testRecord = await Tageventhistory.create({
+      orderId: '440f9cb8-6c81-4337-88d4-512db172de8b', // Order #999999
+      tagId: 'e28011c0a5000067432fafe5',
+      readerId: 'test-reader',
+      antenna: '1',
+      timestamp: new Date(),
+      departmentId: 5,
+      stationName: 'Test Station'
+    });
+    
+    console.log('Test record created:', testRecord.id);
+    
+    // Count records
+    const count = await Tageventhistory.count();
+    console.log('Total history records:', count);
+    
+    res.json({ 
+      success: true, 
+      testRecordId: testRecord.id,
+      totalRecords: count 
+    });
+  } catch (error) {
+    console.error('Test failed:', error);
+    res.status(500).json({ error: error.message, details: error.stack });
+  }
+});
+
+// ✅ Get off-site orders
+router.get('/off-site', authenticateToken, async (req, res) => {
+  try {
+    const offSiteOrders = await orderService.getOffSiteOrders();
+    res.json(offSiteOrders);
+  } catch (error) {
+    res.status(500).json({ 
+      error: 'Failed to fetch off-site orders',
+      details: error.message
+    });
+  }
+});
+
+// Get a single order by ID
+router.get('/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    logInfo(`Fetching order with ID: ${id}`);
+    
+    const order = await Order.findByPk(id);
+    
+    if (!order) {
+      return res.status(404).json({
+        error: 'Order not found',
+        code: 'ORDER_NOT_FOUND'
+      });
+    }
+    
+    res.json(order);
+  } catch (error) {
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to fetch order',
+      errorCode: 'ORDER_FETCH_ERROR'
+    });
+  }
+});
+
+// ✅ Helper function to delete images from S3
+async function deleteImagesFromS3(images) {
+  if (!images || !Array.isArray(images) || images.length === 0) {
+    return;
+  }
+
+  const deletePromises = images.map(async (image) => {
+    if (image.key) {
+      try {
+        // Delete original image
+        await s3.deleteObject({ Bucket: bucketName, Key: image.key }).promise();
+        
+        // Delete thumbnail if it exists
+        if (image.thumbnailKey) {
+          await s3.deleteObject({ Bucket: bucketName, Key: image.thumbnailKey }).promise();
+        }
+      } catch (deleteError) {
+        console.error(`❌ Failed to delete image ${image.key} from S3:`, deleteError);
+      }
+    }
+  });
+
+  await Promise.all(deletePromises);
+}
+
+// Create new order (protected) - ✅ WITH WEBSOCKET EVENT
+router.post('/', authenticateToken, async (req, res) => {
+  try {
+    // Validate the order data
+    if (!req.body.customer) {
+      return res.status(400).json({
+        error: 'Customer name is required',
+        code: 'MISSING_CUSTOMER'
+      });
+    }
+    
+    logInfo(`Creating new order: ${JSON.stringify(req.body)}`);
+    
+    // Generate a unique ID for the new order
+    const orderId = uuidv4();
+    
+    // Get the latest order number and increment
+    const latestOrder = await Order.findOne({
+      order: [['orderNumber', 'DESC']]
+    });
+    
+    const nextOrderNumber = latestOrder ? Number(latestOrder.orderNumber) + 1 : 25000;
+    
+    // ✅ FIXED: Keep the metal object as-is since database now supports nested structure
+    let orderData = { ...req.body };
+    
+    // ✅ Process and validate images array
+    if (orderData.images && Array.isArray(orderData.images)) {
+      // Validate image objects and ensure they have required fields
+      orderData.images = orderData.images.map(image => ({
+        id: image.id,
+        key: image.key,
+        thumbnailKey: image.thumbnailKey,
+        originalUrl: image.originalUrl,
+        thumbnailUrl: image.thumbnailUrl,
+        name: image.name,
+        size: image.size,
+        mimetype: image.mimetype,
+        uploadedAt: image.uploadedAt || new Date().toISOString()
+      }));
+    } else {
+      // Ensure images is always an empty array if not provided
+      orderData.images = [];
+    }
+    
+    // Create the order with the generated ID and order number
+    const newOrder = await Order.create({
+      id: orderId,
+      orderNumber: nextOrderNumber,
+      ...orderData,
+      status: orderData.status || 'Submitted', // Default status
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+  
+    logInfo(`Order created successfully: ${newOrder.id} with ${newOrder.images?.length || 0} images`);
+    
+    // ✅ EMIT WEBSOCKET EVENT FOR ORDER CREATION
+    emitOrderEvent('order_created', newOrder);
+    
+    // Return 201 Created status with the new order
+    res.status(201).json(newOrder);
+  } catch (error) {
+    console.error(`❌ Failed to create order: ${error.message}`);
+    console.error(error.stack);
+    logError(`Failed to create order: ${error.message}`);
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to create order',
+      errorCode: 'ORDER_CREATE_ERROR'
+    });
+  }
+});
+
+// Update an order - ✅ WITH WEBSOCKET EVENT
+router.put('/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if order exists
+    const existingOrder = await Order.findByPk(id);
+    
+    if (!existingOrder) {
+      return res.status(404).json({
+        error: 'Order not found',
+        code: 'ORDER_NOT_FOUND'
+      });
+    }
+    
+    logInfo(`Updating order ${id}: ${JSON.stringify(req.body)}`);
+    
+    // ✅ FIXED: Keep the metal object as-is since database now supports nested structure
+    let updateData = { ...req.body };
+    
+    // ✅ Handle image updates
+    if (updateData.images !== undefined) {
+      // Get the current images to see what needs to be deleted
+      const currentImages = existingOrder.images || [];
+      const newImages = updateData.images || [];
+      
+      // Find images that were removed (exist in current but not in new)
+      const removedImages = currentImages.filter(currentImg => 
+        !newImages.some(newImg => newImg.id === currentImg.id || newImg.key === currentImg.key)
+      );
+      
+      // Delete removed images from S3
+      if (removedImages.length > 0) {
+        await deleteImagesFromS3(removedImages);
+      }
+      
+      // Process and validate the new images array
+      if (Array.isArray(newImages)) {
+        updateData.images = newImages.map(image => ({
+          id: image.id,
+          key: image.key,
+          thumbnailKey: image.thumbnailKey,
+          originalUrl: image.originalUrl,
+          thumbnailUrl: image.thumbnailUrl,
+          name: image.name,
+          size: image.size,
+          mimetype: image.mimetype,
+          uploadedAt: image.uploadedAt || new Date().toISOString()
+        }));
+      } else {
+        updateData.images = [];
+      }
+    }
+    
+    // Update the order
+    await existingOrder.update({
+      ...updateData,
+      updatedAt: new Date()
+    });
+    
+    // Fetch the updated order to return
+    const updatedOrder = await Order.findByPk(id);
+    
+    // ✅ EMIT WEBSOCKET EVENT FOR ORDER UPDATE
+    emitOrderEvent('order_updated', updatedOrder);
+    
+    res.json(updatedOrder);
+  } catch (error) {
+    console.error(`❌ Failed to update order ${req.params.id}:`, error);
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to update order',
+      errorCode: 'ORDER_UPDATE_ERROR'
+    });
+  }
+});
+
+// Delete an order (Admin role required) - ✅ WITH WEBSOCKET EVENT
+router.delete('/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if order exists
+    const existingOrder = await Order.findByPk(id);
+    
+    if (!existingOrder) {
+      return res.status(404).json({
+        error: 'Order not found',
+        code: 'ORDER_NOT_FOUND'
+      });
+    }
+    
+    logInfo(`Deleting order with ID: ${id}`);
+    
+    // ✅ Delete associated images from S3 before deleting the order
+    if (existingOrder.images && Array.isArray(existingOrder.images)) {
+      await deleteImagesFromS3(existingOrder.images);
+    }
+    
+    // Store order info before deletion for WebSocket event
+    const deletedOrderInfo = {
+      id: existingOrder.id,
+      orderNumber: existingOrder.orderNumber,
+      customer: existingOrder.customer
+    };
+    
+    // Delete the order from database
+    await existingOrder.destroy();
+    
+    // ✅ EMIT WEBSOCKET EVENT FOR ORDER DELETION
+    emitOrderEvent('order_deleted', deletedOrderInfo);
+    
+    res.status(200).json({
+      message: 'Order deleted successfully',
+      code: 'ORDER_DELETED'
+    });
+  } catch (error) {
+    console.error(`❌ Failed to delete order ${req.params.id}:`, error);
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to delete order',
+      errorCode: 'ORDER_DELETE_ERROR'
+    });
+  }
+});
+
+// Update order status - ✅ WITH WEBSOCKET EVENT
+router.patch('/:id/status', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    
+    if (!status) {
+      return res.status(400).json({
+        error: 'Status is required',
+        code: 'MISSING_STATUS'
+      });
+    }
+    
+    // Check if order exists
+    const existingOrder = await Order.findByPk(id);
+    
+    if (!existingOrder) {
+      return res.status(404).json({
+        error: 'Order not found',
+        code: 'ORDER_NOT_FOUND'
+      });
+    }
+    
+    logInfo(`Updating order ${id} status to: ${status}`);
+    
+    // ✅ NEW: Prepare update data
+    let updateData = {
+      status,
+      updatedAt: new Date()
+    };
+    
+    // ✅ NEW: When marking as completed, clear all location-related fields
+    if (status.toLowerCase() === 'completed') {
+      updateData = {
+        ...updateData,
+        // Clear department tracking
+        currentDepartment: null,
+        currentStation: null,
+        departmentId: null,
+        // Clear off-site tracking
+        current_location_type: 'rfid', // Reset to default
+        manual_location: null,
+        off_site_detected_at: null,
+        location_notes: null,
+        // Clear department transitions
+        departmentTransitions: []
+      };
+      
+      logInfo(`Order ${id} marked as completed - cleared all location fields`);
+    }
+    
+    // Update the order with the prepared data
+    await existingOrder.update(updateData);
+    
+    // Fetch the updated order to return
+    const updatedOrder = await Order.findByPk(id);
+    
+    // ✅ EMIT WEBSOCKET EVENT FOR STATUS UPDATE
+    emitOrderEvent('order_updated', updatedOrder);
+    
+    res.json(updatedOrder);
+  } catch (error) {
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to update order status',
+      errorCode: 'STATUS_UPDATE_ERROR'
+    });
+  }
+});
+
+// Assign tag to order - ✅ WITH WEBSOCKET EVENT
+router.patch('/:id/tag', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { tagId } = req.body;
+    
+    if (!tagId) {
+      return res.status(400).json({
+        error: 'Tag ID is required',
+        code: 'MISSING_TAG_ID'
+      });
+    }
+    
+    // Check if order exists
+    const existingOrder = await Order.findByPk(id);
+    
+    if (!existingOrder) {
+      return res.status(404).json({
+        error: 'Order not found',
+        code: 'ORDER_NOT_FOUND'
+      });
+    }
+    
+    logInfo(`Assigning tag ${tagId} to order ${id}`);
+    
+    // If this tag is assigned to another order, remove it
+    if (tagId) {
+      await Order.update(
+        { tagId: null },
+        { where: { tagId: tagId, id: { [Op.ne]: id } } }
+      );
+    }
+    
+    // Update the order with the tag
+    await existingOrder.update({
+      tagId,
+      updatedAt: new Date()
+    });
+    
+    // Fetch the updated order to return
+    const updatedOrder = await Order.findByPk(id);
+    
+    // ✅ EMIT WEBSOCKET EVENT FOR TAG ASSIGNMENT
+    emitOrderEvent('order_updated', updatedOrder);
+    
+    res.json(updatedOrder);
+  } catch (error) {
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to assign tag to order',
+      errorCode: 'TAG_ASSIGNMENT_ERROR'
+    });
+  }
+});
+
+// Update an order's department and add a transition - ✅ WITH WEBSOCKET EVENT
+router.put('/:id/department', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { departmentId, departmentName, stationName, transition } = req.body;
+    
+    // Log input data
+    logInfo(`Updating order ${id} to department: ${departmentName}, station: ${stationName}`);
+    logInfo(`Transition data: ${JSON.stringify(transition)}`);
+    
+    // Find the order
+    const order = await Order.findByPk(id);
+    
+    if (!order) {
+      return res.status(404).json({ 
+        error: 'Order not found',
+        code: 'ORDER_NOT_FOUND' 
+      });
+    }
+    
+    // ✅ Update RFID scan timestamp when department changes
+    await orderService.updateOrderRfidScan(id, {
+      departmentId,
+      departmentName,
+      stationName
+    });
+    
+    // Update department and station info
+    order.departmentId = departmentId;
+    order.currentDepartment = departmentName;
+    order.currentStation = stationName;
+    
+    // Handle transitions array
+    let transitions = [];
+    
+    // First try to parse existing transitions if they exist
+    if (order.departmentTransitions) {
+      try {
+        // If it's a string, parse it; if it's already an array, use it
+        transitions = typeof order.departmentTransitions === 'string' 
+          ? JSON.parse(order.departmentTransitions) 
+          : order.departmentTransitions;
+      } catch (parseErr) {
+        console.error('Error parsing existing transitions:', parseErr);
+        transitions = [];
+      }
+    }
+    
+    // Add the new transition with station info
+    transitions.push(transition);
+    
+    // Store the transitions (as array, Sequelize will handle serialization)
+    order.departmentTransitions = transitions;
+    
+    // Save the updated order
+    await order.save();
+    
+    // ✅ EMIT WEBSOCKET EVENT FOR DEPARTMENT UPDATE
+    emitOrderEvent('order_updated', order);
+    
+    // Log success
+    logInfo(`Order ${id} updated successfully. Total transitions: ${transitions.length}`);
+    
+    // Return the updated order
+    res.json(order);
+  } catch (error) {
+    console.error('Error updating order:', error);
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to update order department',
+      errorCode: 'DEPARTMENT_UPDATE_ERROR'
+    });
+  }
+});
+
+// ✅ Assign manual location to off-site order - WITH WEBSOCKET EVENT
+router.patch('/:id/location', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { location, notes } = req.body;
+    
+    if (!location) {
+      return res.status(400).json({
+        error: 'Location is required',
+        code: 'MISSING_LOCATION'
+      });
+    }
+    
+    const updatedOrder = await orderService.assignManualLocation(id, location, notes);
+    
+    if (!updatedOrder) {
+      return res.status(404).json({
+        error: 'Order not found',
+        code: 'ORDER_NOT_FOUND'
+      });
+    }
+    
+    // ✅ EMIT WEBSOCKET EVENT FOR LOCATION UPDATE
+    emitOrderEvent('order_updated', updatedOrder);
+    
+    logInfo(`Assigned manual location '${location}' to order ${id}`);
+    res.json(updatedOrder);
+  } catch (error) {
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to assign manual location',
+      errorCode: 'LOCATION_ASSIGNMENT_ERROR'
+    });
+  }
+});
+
+// ✅ Manual trigger for off-site detection (for testing)
+router.post('/check-missing', authenticateToken, async (req, res) => {
+  try {
+    const { thresholdSeconds = 30 } = req.body;
+    const missingCount = await orderService.checkForMissingOrders(thresholdSeconds);
+    
+    res.json({
+      message: `Checked for missing orders`,
+      missingOrdersFound: missingCount,
+      threshold: `${thresholdSeconds} seconds`
+    });
+  } catch (error) {
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to check for missing orders',
+      errorCode: 'MISSING_CHECK_ERROR'
+    });
+  }
+});
+
+// ✅ Combined reset and check missing endpoint
+router.post('/reset-and-check', authenticateToken, async (req, res) => {
+  try {
+    // Step 1: Reset department tracking for all tagged orders
+    const resetResult = await Order.update({
+      current_location_type: 'rfid',
+      manual_location: null,
+      location_notes: null,
+      off_site_detected_at: null,
+      last_rfid_scan: new Date(),
+      location_updated_at: new Date(),
+      currentDepartment: null,
+      currentStation: null,
+      departmentId: null,
+      departmentTransitions: []
+    }, {
+      where: {
+        tagId: { [Op.not]: null } // Only reset orders that have tags
+      }
+    });
+
+    // Step 2: Check for missing orders (after 10 seconds)
+    const missingCount = await orderService.checkForMissingOrders(10);
+    
+    logInfo(`Reset tracking: ${resetResult[0]} orders reset, ${missingCount} missing orders found`);
+    
+    res.json({ 
+      message: 'Tracking reset and missing orders checked',
+      ordersReset: resetResult[0],
+      missingOrdersFound: missingCount
+    });
+  } catch (error) {
+    logError(`Failed to reset and check tracking: ${error.message}`);
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to reset and check tracking',
+      errorCode: 'RESET_CHECK_ERROR'
+    });
+  }
+});
+
+router.get('/test-detection', async (req, res) => {
+  try {
+    const missingCount = await orderService.checkForMissingOrders(30);
+    res.json({
+      message: 'Manual detection test',
+      missingOrdersFound: missingCount,
+      thresholdSeconds: 30,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+      stack: error.stack
+    });
+  }
+});
+
+// ✅ Get images for a specific order
+router.get('/:id/images', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const order = await Order.findByPk(id, {
+      attributes: ['id', 'images']
+    });
+    
+    if (!order) {
+      return res.status(404).json({
+        error: 'Order not found',
+        code: 'ORDER_NOT_FOUND'
+      });
+    }
+    
+    res.json({
+      orderId: id,
+      images: order.images || []
+    });
+  } catch (error) {
+    handleApiError(error, req, res, {
+      defaultMessage: 'Failed to fetch order images',
+      errorCode: 'ORDER_IMAGES_FETCH_ERROR'
+    });
+  }
+});
+
+// ✅ Update images for a specific order - WITH WEBSOCKET EVENT
+router.put('/:id/images', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { images } = req.body;
+    
+    if (!Array.isArray(images)) {
+      return res.status(400).json({
+        error: 'Images must be an array',
+        code: 'INVALID_IMAGES_FORMAT'
+      });
+    }
+    
+    const order = await Order.findByPk(id);
+    
+    if (!order) {
+      return res.status(404).json({
+        error: 'Order not found',
+        code: 'ORDER_NOT_FOUND'
+      });
+    }
+    
+    // Get current images to find what to delete
+    const currentImages = order.images || [];
+    
+    // Find images that were removed
+    const removedImages = currentImages.filter(currentImg => 
+      !images.some(newImg => newImg.id === currentImg.id || newImg.key === currentImg.key)
+    );
+    
+    // Delete removed images from S3
+    if (removedImages.length > 0) {
+      await deleteImagesFromS3(removedImages);
+    }
+    
+    // Validate and format new images
+    const formattedImages = images.map(image => ({
+      id: image.id,
+      key: image.key,
+      thumbnailKey: image.thumbnailKey,
+      originalUrl: image.originalUrl,
+      thumbnailUrl: image.thumbnailUrl,
+     name: image.name,
+     size: image.size,
+     mimetype: image.mimetype,
+     uploadedAt: image.uploadedAt || new Date().toISOString()
+   }));
+   
+   // Update the order with new images
+   await order.update({
+     images: formattedImages,
+     updatedAt: new Date()
+   });
+   
+   // Fetch updated order for WebSocket event
+   const updatedOrder = await Order.findByPk(id);
+   
+   // ✅ EMIT WEBSOCKET EVENT FOR IMAGE UPDATE
+   emitOrderEvent('order_updated', updatedOrder);
+   
+   res.json({
+     orderId: id,
+     images: formattedImages,
+     message: 'Images updated successfully'
+   });
+ } catch (error) {
+   handleApiError(error, req, res, {
+     defaultMessage: 'Failed to update order images',
+     errorCode: 'ORDER_IMAGES_UPDATE_ERROR'
+   });
+ }
+});
+
+// ✅ NEW: Reactivate a completed order (bring back to production) - WITH WEBSOCKET EVENT
+router.patch('/:id/reactivate', authenticateToken, async (req, res) => {
+ try {
+   const { id } = req.params;
+   
+   // Check if order exists
+   const existingOrder = await Order.findByPk(id);
+   
+   if (!existingOrder) {
+     return res.status(404).json({
+       error: 'Order not found',
+       code: 'ORDER_NOT_FOUND'
+     });
+   }
+   
+   // Check if order is actually completed
+   if (existingOrder.status !== 'completed') {
+     return res.status(400).json({
+       error: 'Order is not completed',
+       code: 'ORDER_NOT_COMPLETED'
+     });
+   }
+   
+   logInfo(`Reactivating completed order ${id}`);
+   
+   // Reactivate the order - set status back to in-progress
+   const updateData = {
+     status: 'in-progress',
+     // Reset location type to enable RFID tracking again
+     current_location_type: 'rfid',
+     last_rfid_scan: new Date(),
+     location_updated_at: new Date(),
+     updatedAt: new Date()
+     // Note: Keep tagId so the order can be tracked again
+   };
+   
+   await existingOrder.update(updateData);
+   
+   // Fetch the updated order to return
+   const updatedOrder = await Order.findByPk(id);
+   
+   // ✅ EMIT WEBSOCKET EVENT FOR ORDER REACTIVATION
+   emitOrderEvent('order_updated', updatedOrder);
+   
+   logInfo(`Order ${id} reactivated successfully - back in production`);
+   
+   res.json(updatedOrder);
+ } catch (error) {
+   handleApiError(error, req, res, {
+     defaultMessage: 'Failed to reactivate order',
+     errorCode: 'ORDER_REACTIVATE_ERROR'
+   });
+ }
+});
+
+module.exports = router;```
+
+## File: ./server/src/mqtt/connection.js
+```javascript
+// server/src/mqtt/connection.js
+const mqtt = require('mqtt');
+const fs = require('fs');
+const path = require('path');
+const { logDebug, logError, logInfo } = require('../utils/logger');
+const { processRfidEvent } = require('./eventProcessing');
+const topics = require('./topics');
+const { mqttConfig } = require('./config');
+
+// Track the MQTT connection status
+let mqttStatus = {
+  connected: false,
+  lastError: null,
+  reconnectAttempts: 0,
+  lastReconnectTime: 0
+};
+
+// MQTT client instance
+let client = null;
+
+// Function to emit the current status to all clients
+const broadcastStatus = (io) => {
+  if (!io) return;
+  
+  io.emit('mqtt_status', {
+    connected: mqttStatus.connected,
+    lastError: mqttStatus.lastError,
+    timestamp: new Date().toISOString()
+  });
+};
+
+// Connect to MQTT broker
+const connectToMqtt = (io) => {
+  try {
+    logInfo(`Connecting to MQTT broker at ${mqttConfig.brokerUrl}`);
+
+    // Only create one client instance
+    if (client && client.connected) {
+      logInfo('MQTT client already connected, reusing existing client');
+      
+      // Broadcast current status
+      if (io) {
+        broadcastStatus(io);
+      }
+      
+      return client;
+    }
+
+    const options = {
+      clientId: `rfid-server-${Math.random().toString(16).slice(2)}`,
+      clean: true,
+      reconnectPeriod: 5000,
+      connectTimeout: 30000,
+      keepalive: 60,
+    };
+
+    if (mqttConfig.useTls) {
+      try {
+        options.cert = fs.readFileSync(path.resolve(mqttConfig.certPath));
+        options.key = fs.readFileSync(path.resolve(mqttConfig.keyPath));
+        options.ca = fs.readFileSync(path.resolve(mqttConfig.caPath));
+        options.rejectUnauthorized = true;
+        logDebug('✅ TLS certs loaded successfully');
+      } catch (err) {
+        logError(`❌ Failed to load TLS certs: ${err.message}`);
+        mqttStatus.lastError = `TLS certificate error: ${err.message}`;
+        if (io) io.emit('mqtt_error', { message: mqttStatus.lastError });
+        return null;
+      }
+    }
+
+    // Create the client
+    client = mqtt.connect(mqttConfig.brokerUrl, options);
+
+    // Set up MQTT client event handlers
+    client.on('connect', () => {
+      logInfo('✅ Connected to MQTT broker');
+      mqttStatus.connected = true;
+      mqttStatus.lastError = null;
+      mqttStatus.reconnectAttempts = 0;
+      mqttStatus.lastReconnectTime = 0;
+      
+      if (io) broadcastStatus(io);
+      
+      // Subscribe to topics
+      const topicList = topics.getAllTopics();
+      topicList.forEach((topic) => {
+        client.subscribe(topic, (err) => {
+          if (err) logError(`❌ Subscription error: ${err.message}`);
+          else logDebug(`✅ Subscribed to ${topic}`);
+        });
+      });
+    });
+
+    client.on('reconnect', () => {
+      const now = Date.now();
+      
+      // Only log if it's been a while since the last attempt
+      if (now - mqttStatus.lastReconnectTime > 5000) {
+        mqttStatus.reconnectAttempts++;
+        mqttStatus.lastReconnectTime = now;
+        logDebug(`Attempting to reconnect to MQTT broker (attempt ${mqttStatus.reconnectAttempts})`);
+        
+        if (io) {
+          io.emit('mqtt_status', {
+            connected: false,
+            reconnecting: true,
+            attempts: mqttStatus.reconnectAttempts,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+    });
+
+    client.on('error', (err) => {
+      logError(`❌ MQTT client error: ${err.message}`);
+      mqttStatus.lastError = err.message;
+      
+      if (io) {
+        io.emit('mqtt_error', { 
+          message: err.message,
+          timestamp: new Date().toISOString()
+        });
+      }
+    });
+
+    client.on('offline', () => {
+      logError('❌ MQTT client offline');
+      mqttStatus.connected = false;
+      
+      if (io) broadcastStatus(io);
+    });
+
+    client.on('message', (topic, message) => {
+      try {
+        const parsed = JSON.parse(message.toString());
+        
+        // Process the event and emit it to all clients
+        if (io) {
+          io.emit('rfid_event', parsed);
+          processRfidEvent(parsed, io);
+        }
+      } catch (err) {
+        logError(`❌ Message parsing error: ${err.message}`);
+      }
+    });
+
+    // Set up socket listeners if io is provided
+    if (io) {
+      io.on('connection', (socket) => {
+        // Send current status when a client connects
+        socket.emit('mqtt_status', {
+          connected: mqttStatus.connected,
+          lastError: mqttStatus.lastError,
+          timestamp: new Date().toISOString()
+        });
+        
+        // Listen for status requests
+        socket.on('get_mqtt_status', () => {
+          socket.emit('mqtt_status', {
+            connected: mqttStatus.connected,
+            lastError: mqttStatus.lastError,
+            timestamp: new Date().toISOString()
+          });
+        });
+      });
+    }
+
+    return client;
+  } catch (err) {
+    logError(`❌ MQTT connection error: ${err.message}`);
+    mqttStatus.lastError = err.message;
+    
+    if (io) {
+      io.emit('mqtt_error', { 
+        message: err.message,
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    return null;
+  }
+};
+
+// Make sure MQTT is connected on server start and stays connected
+const ensureMqttConnected = (io) => {
+  // Initial connection
+  let mqttClient = connectToMqtt(io);
+  
+  // Set up a check every minute to ensure connection
+  setInterval(() => {
+    if (!client || !client.connected) {
+      logInfo('MQTT connection check: Not connected, attempting to reconnect');
+      mqttClient = connectToMqtt(io);
+    } else {
+      logDebug('MQTT connection check: Connected');
+    }
+  }, 60000);
+  
+  return mqttClient;
+};
+
+// Function to close MQTT connection gracefully
+const closeMqttConnection = () => {
+  if (client && client.connected) {
+    logInfo('Closing MQTT connection');
+    client.end(true);
+    mqttStatus.connected = false;
+  }
+};
+
+module.exports = { 
+  connectToMqtt, 
+  ensureMqttConnected,
+  broadcastStatus, 
+  mqttStatus,
+  closeMqttConnection
+};```
+
+## File: ./server/src/mqtt/eventHandlers.js
+```javascript
+const { logger } = require('../utils/logger');
+const { processRfidEvent } = require('./eventProcessing');
+const { resolveDepartmentAndStation } = require('./rfidResolver');
+const orderService = require('../services/orderService');
+const { Order, Tageventhistory } = require('../../models');
+
+// 🆕 Rate limiting to prevent rapid location changes
+const SCAN_RATE_LIMIT = 30000; // 30 seconds between location updates
+const lastLocationUpdates = new Map(); // Track last location update time per tag
+
+const setupConnectionHandlers = (client, io) => {
+  // Attach socket.io instance
+  client._socketIo = io;
+
+  // MQTT message handler
+  client.on('message', async (topic, message) => {
+    try {
+      const payload = JSON.parse(message.toString());
+      
+      // Skip heartbeat and system messages - too noisy
+      if (payload.type === 'heartbeat' || payload.component === 'RG') {
+        return;
+      }
+
+      // Only forward actual tag events to frontend
+      if (topic.includes('tagdata') || topic.includes('events')) {
+        io.emit('rfid_event', payload);
+      }
+
+      // Enhanced RFID event processing with off-site detection
+      if (payload.tagId) {
+        // Find order by tag ID
+        const order = await Order.findOne({
+          where: { tagId: payload.tagId }
+        });
+
+        if (order) {
+          // ✅ FIXED: Check order status FIRST, before any processing
+          if (order.status === 'completed') {
+            logger.debug(`📱 Ignoring RFID scan for completed order: ${order.orderNumber} (${order.tagId})`);
+            return; // Exit completely - no database updates, no websocket events
+          }
+
+          // Extract reader information from payload
+          const tagId = payload.tagId;
+          const hostName = payload.data?.hostName?.toLowerCase() || payload.hostName?.toLowerCase();
+          const antenna = payload.data?.antenna || payload.antenna || '1';
+          
+          // Log the scan event
+          logger.debug(`📡 RFID scan: Tag ${tagId} at reader ${hostName}, antenna ${antenna}`);
+          
+          // Resolve reader location to department/station
+          let stationInfo = null;
+          if (hostName && antenna) {
+            const result = resolveDepartmentAndStation(hostName, antenna);
+            
+            if (result && !result.error && result.department && result.station) {
+              stationInfo = {
+                departmentId: getDepartmentId(result.department), // Helper function to get dept ID
+                departmentName: result.department,
+                stationName: result.station
+              };
+              
+              logger.debug(`📍 Resolved location: ${result.department} > ${result.station}`);
+            } else {
+              logger.debug(`⚠️ Could not resolve location for reader ${hostName}, antenna ${antenna}`);
+            }
+          }
+          
+          // 🆕 NEW: Rate limiting for location updates
+          const now = Date.now();
+          const lastUpdate = lastLocationUpdates.get(tagId);
+          const locationKey = `${stationInfo?.departmentName}-${stationInfo?.stationName}`;
+          const lastLocationKey = lastLocationUpdates.get(`${tagId}_location`);
+          
+          // Check if this is a different location and enough time has passed
+          const shouldUpdateLocation = !lastUpdate || 
+            (now - lastUpdate > SCAN_RATE_LIMIT) || 
+            (lastLocationKey !== locationKey);
+          
+          console.log('🔍 Rate limiting check:', {
+            tagId,
+            orderNumber: order.orderNumber,
+            currentLocation: `${order.currentDepartment} > ${order.currentStation}`,
+            newLocation: locationKey,
+            lastUpdate: lastUpdate ? new Date(lastUpdate).toISOString() : 'never',
+            timeSinceLastUpdate: lastUpdate ? now - lastUpdate : 'N/A',
+            shouldUpdate: shouldUpdateLocation,
+            rateLimitMs: SCAN_RATE_LIMIT
+          });
+
+          if (shouldUpdateLocation && stationInfo) {
+            console.log(`📍 Updating location for order ${order.orderNumber}: ${locationKey}`);
+            
+            // Update the rate limiting tracking
+            lastLocationUpdates.set(tagId, now);
+            lastLocationUpdates.set(`${tagId}_location`, locationKey);
+            
+            // ✅ Now safe to update RFID scan (order is confirmed not completed)
+            await orderService.updateOrderRfidScan(order.id, stationInfo);
+            
+            // 🆕 Record scan history
+            console.log('🔍 Checking if should record history...', {
+              hasStationInfo: !!stationInfo,
+              departmentId: stationInfo?.departmentId,
+              stationName: stationInfo?.stationName,
+              orderNumber: order.orderNumber,
+              tagId,
+              hostName,
+              antenna
+            });
+            
+            if (stationInfo && stationInfo.departmentId && stationInfo.stationName) {
+              try {
+                console.log('📝 Attempting to record scan history...', {
+                  orderId: order.id,
+                  tagId: tagId,
+                  readerId: hostName,
+                  antenna: antenna,
+                  departmentId: stationInfo.departmentId,
+                  stationName: stationInfo.stationName,
+                  timestamp: new Date()
+                });
+                
+                const historyRecord = await Tageventhistory.create({
+                  orderId: order.id,
+                  tagId: tagId,
+                  readerId: hostName,
+                  antenna: antenna,
+                  timestamp: new Date(),
+                  departmentId: stationInfo.departmentId,
+                  stationName: stationInfo.stationName
+                });
+                
+                console.log('✅ Successfully recorded scan history:', {
+                  historyId: historyRecord.id,
+                  orderNumber: order.orderNumber,
+                  department: stationInfo.departmentName,
+                  station: stationInfo.stationName,
+                  timestamp: historyRecord.timestamp
+                });
+                
+                logger.debug(`📝 Recorded scan history: ${order.orderNumber} at ${stationInfo.departmentName} > ${stationInfo.stationName}`);
+              } catch (historyError) {
+                console.error('❌ Failed to record scan history:', {
+                  error: historyError.message,
+                  stack: historyError.stack,
+                  orderNumber: order.orderNumber,
+                  tagId,
+                  stationInfo
+                });
+                logger.error(`❌ Failed to record scan history: ${historyError.message}`);
+              }
+            }
+            
+            // Fetch the updated order to emit to frontend
+            const updatedOrder = await Order.findByPk(order.id);
+            io.emit('order_updated', updatedOrder.toJSON());
+            
+          } else {
+            console.log(`⏳ Rate limited: Skipping location update for order ${order.orderNumber} (too soon or same location)`);
+          }
+          
+          // Log if order was previously off-site (returning to RFID)
+          if (order.current_location_type === 'off-site' || order.current_location_type === 'manual') {
+            const location = stationInfo ? `${stationInfo.departmentName} > ${stationInfo.stationName}` : 'RFID tracking';
+            logger.info(`📍 Order ${order.orderNumber} (${order.tagId}) returned from off-site to ${location}`);
+          }
+          
+        } else {
+          // Only log unassigned tags occasionally to avoid spam
+          if (Math.random() < 0.01) { // Log 1% of unassigned tag scans
+            logger.debug(`⚠️ Unassigned tag scanned: ${payload.tagId}`);
+          }
+        }
+      }
+
+      // Optional: also run internal processing
+      if (typeof processRfidEvent === 'function') {
+        processRfidEvent(payload, io);
+      }
+    } catch (err) {
+      logger.error('❌ Failed to process MQTT message:', { error: err.message, topic });
+    }
+  });
+
+  // Connection event handlers - only log important state changes
+  client.on('connect', () => {
+    logger.info('✅ MQTT Connected to broker');
+  });
+
+  client.on('error', (error) => {
+    logger.error('❌ MQTT Connection error:', { error: error.message });
+  });
+
+  client.on('close', () => {
+    logger.warn('🔌 MQTT Connection closed');
+  });
+
+  client.on('reconnect', () => {
+    logger.info('🔄 MQTT Reconnecting...');
+  });
+
+  client.on('offline', () => {
+    logger.warn('📴 MQTT Client offline');
+  });
+};
+
+// Helper function to map department names to IDs
+function getDepartmentId(departmentName) {
+  const departmentMap = {
+    "Designers": 4,
+    "Jewelers": 5,
+    "Setters": 6,
+    "Polishers": 7,
+    "Diamond Counting": 8,
+    "Shipping": 9
+  };
+  
+  return departmentMap[departmentName] || null;
+}
+
+module.exports = {
+  setupConnectionHandlers
+};```
+
+## File: ./server/src/mqtt/rfidMapping.js
+```javascript
+// Mapping of hostName + antenna number to Department + Station
+const rfidMapping = {
+    fx96006e8f12: { // ✅ Jewelers reader
+      1: { department: "Jewelers", station: "Roger" },
+      2: { department: "Jewelers", station: "Tro" },
+      3: { department: "Jewelers", station: "Vicken" },
+      4: { department: "Jewelers", station: "Simon" },
+      5: { department: "Jewelers", station: "Hratch" },
+      6: { department: "Jewelers", station: "Ara" },
+      7: { department: "Jewelers", station: "Hrant" },
+      8: { department: "Jewelers", station: "Engraving" }
+    },
+    fx96006e906c: { // ✅ Designers reader
+      1: { department: "Designers", station: "Jed" },
+      2: { department: "Designers", station: "Designer 1" },
+      3: { department: "Designers", station: "Sebouh" },
+      4: { department: "Designers", station: "Aram" },
+      5: { department: "Jewelers", station: "Ardziv" }, // ⚡ Special override
+      6: { department: "Diamond Counting", station: "Diamond Counting" },
+      7: { special: "TagAssignment" }, // ⚡ Special: Assign Tag to Order
+      8: { special: "ExitDoor" }, // ⚡ Special: Exit Door
+    },
+    fx96006e8fb7: { // ✅ Setters reader
+      1: { department: "Setters", station: "Steve Tch." },
+      2: { department: "Setters", station: "Steve" },
+      3: { department: "Setters", station: "Hovig" },
+      4: { department: "Setters", station: "Paolo" },
+      6: { department: "Setters", station: "Sako" },
+      5: { department: "Polishers", station: "Polisher" }, // ⚡ Special override
+    }
+  };
+  
+  module.exports = { rfidMapping };
+  ```

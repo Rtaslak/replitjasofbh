@@ -1,0 +1,176 @@
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 98%;
+    --foreground: 222 25% 16%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 25% 16%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 25% 16%;
+
+    --primary: 210 100% 60%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 20% 96%;
+    --secondary-foreground: 222 25% 16%;
+
+    --muted: 220 20% 96%;
+    --muted-foreground: 222 15% 45%;
+
+    --accent: 210 100% 95%;
+    --accent-foreground: 222 25% 16%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 20% 90%;
+    --input: 220 20% 90%;
+    --ring: 210 100% 60%;
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 222 25% 16%;
+    --sidebar-primary: 210 100% 60%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 20% 96%;
+    --sidebar-accent-foreground: 222 25% 16%;
+    --sidebar-border: 220 20% 90%;
+    --sidebar-ring: 210 100% 60%;
+  }
+
+  .dark {
+    --background: 240 10% 8%; /* Updated to lighter dark background */
+    --foreground: 210 20% 98%;
+
+    --card: 222 25% 16%;
+    --card-foreground: 210 20% 98%;
+
+    --popover: 222 25% 16%;
+    --popover-foreground: 210 20% 98%;
+
+    --primary: 210 100% 60%;
+    --primary-foreground: 210 20% 98%;
+
+    --secondary: 222 20% 20%;
+    --secondary-foreground: 210 20% 98%;
+
+    --muted: 222 20% 20%;
+    --muted-foreground: 215 20% 70%;
+
+    --accent: 216 34% 22%;
+    --accent-foreground: 210 20% 98%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 222 20% 26%;
+    --input: 222 20% 26%;
+    --ring: 210 100% 60%;
+
+    --sidebar-background: 222 25% 16%;
+    --sidebar-foreground: 210 20% 98%;
+    --sidebar-primary: 210 100% 60%;
+    --sidebar-primary-foreground: 210 20% 98%;
+    --sidebar-accent: 222 20% 20%;
+    --sidebar-accent-foreground: 210 20% 98%;
+    --sidebar-border: 222 20% 26%;
+    --sidebar-ring: 210 100% 60%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased overflow-hidden;
+    font-feature-settings: "ss01", "ss02", "cv01", "cv02", "cv03";
+  }
+
+  html {
+    @apply scroll-smooth overflow-hidden;
+  }
+  
+  /* Only allow scrolling on main content areas */
+  main {
+    @apply overflow-auto custom-scrollbar;
+  }
+}
+
+@layer utilities {
+  .scrollbar-none {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Custom scrollbar styles */
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--primary)) transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    @apply w-2.5;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    @apply bg-primary rounded-full border-4 border-transparent bg-clip-content hover:bg-primary/80;
+  }
+
+  /* Updated glass-panel utility class */
+  .glass-panel {
+    @apply backdrop-blur-xl bg-background/80 border border-border/80 rounded-lg shadow-sm;
+  }
+  
+  .glass-card {
+    @apply backdrop-blur-md bg-white/80 dark:bg-black/40 border border-white/20 dark:border-white/10 shadow-lg;
+  }
+  
+  /* Add department-card utility class */
+  .department-card {
+    @apply relative overflow-hidden glass-panel p-5;
+  }
+  
+  /* Card hover effects */
+  .card-hover {
+    @apply transition-all duration-300 hover:shadow-lg hover:scale-[1.02];
+  }
+  
+  .page-transition-enter {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  
+  .page-transition-enter-active {
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+  }
+  
+  .page-transition-exit {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  
+  .page-transition-exit-active {
+    opacity: 0;
+    transform: translateY(-8px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+  }
+}
